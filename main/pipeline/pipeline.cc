@@ -16,6 +16,7 @@
 #include "cfg/CFG.h"
 #include "cfg/builder/builder.h"
 #include "common/FileOps.h"
+#include "common/JSON.h"
 #include "common/concurrency/ConcurrentQueue.h"
 #include "common/sort/sort.h"
 #include "common/strings/formatting.h"
@@ -94,6 +95,7 @@ void setGlobalStateOptions(core::GlobalState &gs, const options::Options &opts) 
     }
 
     gs.trackUntyped = opts.trackUntyped;
+    gs.collectSendFacts = opts.print.EffectFacts.enabled;
     gs.printingFileTable = opts.print.FileTableJson.enabled || opts.print.FileTableFullJson.enabled;
 
     if (opts.suggestTyped) {
@@ -1366,6 +1368,35 @@ incrementalResolve(core::GlobalState &gs, vector<ast::ParsedFile> what,
 
 namespace {
 
+// Effects prototype (M0): print one JSON line per method body saying what each send dispatched to.
+void printEffectFactsForBody(core::Context ctx, const options::Options &opts, core::MethodRef method,
+                             core::LocOffsets declLoc) {
+    auto facts = infer::Inference::takeSendFacts();
+    fmt::memory_buffer calls;
+    fmt::memory_buffer unresolved;
+    UnorderedSet<uint32_t> seenCallees;
+    int counts[3] = {0, 0, 0};
+    for (auto &fact : facts) {
+        counts[static_cast<int>(fact.kind)]++;
+        if (fact.kind == infer::SendFact::Kind::Resolved) {
+            if (seenCallees.insert(fact.method.id()).second) {
+                fmt::format_to(std::back_inserter(calls), "{}{}", calls.size() == 0 ? "" : ",", fact.method.id());
+            }
+            continue;
+        }
+        auto line = fact.loc.exists() ? ctx.locAt(fact.loc).toDetails(ctx).first.line : 0;
+        fmt::format_to(std::back_inserter(unresolved), "{}[\"{}\",\"{}\",{}]", unresolved.size() == 0 ? "" : ",",
+                       fact.kind == infer::SendFact::Kind::UntypedReceiver ? "untyped" : "nomethod",
+                       JSON::escape(fact.fun.show(ctx)), line);
+    }
+    auto declLine = declLoc.exists() ? ctx.locAt(declLoc).toDetails(ctx).first.line : 0;
+    opts.print.EffectFacts.fmt(
+        "{{\"t\":\"body\",\"m\":{},\"file\":\"{}\",\"strict\":{},\"line\":{},\"n\":[{},{},{}],\"calls\":[{}],"
+        "\"unres\":[{}]}}\n",
+        method.id(), JSON::escape(string(ctx.file.data(ctx).path())), static_cast<int>(ctx.file.data(ctx).strictLevel),
+        declLine, counts[0], counts[1], counts[2], fmt::to_string(calls), fmt::to_string(unresolved));
+}
+
 class CFGCollectorAndTyper {
     const options::Options &opts;
 
@@ -1382,6 +1413,9 @@ public:
 
         if (opts.stopAfterPhase != options::Phase::CFG) {
             cfg = infer::Inference::run(ctx.withOwner(cfg->symbol), move(cfg));
+            if (cfg && print.EffectFacts.enabled) {
+                printEffectFactsForBody(ctx, opts, cfg->symbol, cfg->declLoc);
+            }
             if (cfg) {
                 for (auto &extension : ctx.state.semanticExtensions) {
                     extension->typecheck(ctx, ctx.file, *cfg);
@@ -1411,6 +1445,9 @@ public:
 
         if (opts.stopAfterPhase != options::Phase::CFG) {
             cfg = infer::Inference::run(ctx.withOwner(cfg->symbol), move(cfg));
+            if (cfg && print.EffectFacts.enabled) {
+                printEffectFactsForBody(ctx, opts, cfg->symbol, cfg->declLoc);
+            }
             if (cfg) {
                 for (auto &extension : ctx.state.semanticExtensions) {
                     extension->typecheck(ctx, ctx.file, *cfg);
@@ -1771,6 +1808,31 @@ void printGlobalTables(const core::GlobalState &gs, const options::Options &opts
     }
     if (opts.print.SymbolTableFullRaw.enabled) {
         opts.print.SymbolTableFullRaw.fmt("{}\n", gs.showRawFull());
+    }
+}
+
+// Effects prototype (M0): print one JSON line per method symbol, so that the callee ids in the
+// "body" lines can be classified (has a body here, standard library, RBI, abstract, ...).
+void printEffectFactDefs(const core::GlobalState &gs, const options::Options &opts) {
+    if (!opts.print.EffectFacts.enabled) {
+        return;
+    }
+    for (uint32_t i = 1; i < gs.methodsUsed(); i++) {
+        auto method = core::MethodRef(gs, i);
+        auto data = method.data(gs);
+        auto loc = data->loc();
+        string_view src = "none";
+        string path;
+        if (loc.exists() && loc.file().exists()) {
+            auto &file = loc.file().data(gs);
+            src = file.isPayload() ? "payload" : file.isRBI() ? "rbi" : "source";
+            path = string(file.path());
+        }
+        opts.print.EffectFacts.fmt("{{\"t\":\"def\",\"m\":{},\"name\":\"{}\",\"fun\":\"{}\",\"owner\":\"{}\","
+                                   "\"src\":\"{}\",\"file\":\"{}\",\"abstract\":{},\"overridable\":{}}}\n",
+                                   i, JSON::escape(method.show(gs)), JSON::escape(data->name.show(gs)),
+                                   JSON::escape(data->owner.show(gs)), src, JSON::escape(path),
+                                   bool(data->flags.isAbstract), bool(data->flags.isOverridable));
     }
 }
 

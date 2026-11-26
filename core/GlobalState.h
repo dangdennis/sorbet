@@ -616,6 +616,8 @@ public:
     bool autocorrect = false;
     bool didYouMean = true;
     TrackUntyped trackUntyped = TrackUntyped::Nowhere;
+    // Effects prototype (M0): when set, inference records what each send dispatched to.
+    bool collectSendFacts = false;
 
     /**
      * The severity to use when reporting untyped highlights.

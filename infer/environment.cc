@@ -5,6 +5,7 @@
 #include "core/GlobalState.h"
 #include "core/TypeConstraint.h"
 #include "core/TypeErrorDiagnostics.h"
+#include "infer/inference.h"
 #include <algorithm> // find, remove_if
 
 using namespace std;
@@ -1210,6 +1211,16 @@ core::TypePtr Environment::processBinding(
                                 }
                             }
                         }
+                    }
+
+                    if (ctx.state.collectSendFacts) {
+                        auto kind = SendFact::Kind::Resolved;
+                        if (!it->main.method.exists()) {
+                            const auto &componentRecv = it->main.receiver ? it->main.receiver : recvType.type;
+                            kind = componentRecv.isUntyped() ? SendFact::Kind::UntypedReceiver
+                                                             : SendFact::Kind::NoMethod;
+                        }
+                        Inference::recordSendFact(SendFact{kind, it->main.method, send.fun, bind.loc});
                     }
 
                     lspQueryMatch = lspQueryMatch || lspQuery.matchesSymbol(it->main.method);

@@ -144,6 +144,7 @@ const vector<PrintOptions> print_options({
     {"minimized-rbi", &Printers::MinimizeRBI},
     {"payload-sources", &Printers::PayloadSources, true, true, true},
     {"untyped-blame", &Printers::UntypedBlame, true, true, true},
+    {"effect-facts", &Printers::EffectFacts, true, true},
 });
 
 struct ParserOptions {
@@ -223,6 +224,7 @@ vector<reference_wrapper<PrinterConfig>> Printers::printers() {
         MinimizeRBI,
         PayloadSources,
         UntypedBlame,
+        EffectFacts,
     });
 }
 

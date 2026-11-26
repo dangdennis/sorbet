@@ -2020,6 +2020,7 @@ void GlobalState::copyOptions(const core::GlobalState &other) {
     this->experimentalMethodModifiers = other.experimentalMethodModifiers;
     this->suppressPayloadSuperclassRedefinitionFor = other.suppressPayloadSuperclassRedefinitionFor;
     this->trackUntyped = other.trackUntyped;
+    this->collectSendFacts = other.collectSendFacts;
     this->highlightUntypedDiagnosticSeverity = other.highlightUntypedDiagnosticSeverity;
     this->printingFileTable = other.printingFileTable;
     this->errorUrlBase = other.errorUrlBase;

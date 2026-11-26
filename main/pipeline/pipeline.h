@@ -120,6 +120,8 @@ void typecheck(const core::GlobalState &gs, std::vector<ast::ParsedFile> &&what,
 void printGlobalTables(const core::GlobalState &gs, const options::Options &opts,
                        const UnorderedMap<long, long> &untypedUsages);
 
+void printEffectFactDefs(const core::GlobalState &gs, const options::Options &opts);
+
 void printUntypedBlames(const core::GlobalState &gs, const UnorderedMap<long, long> &untypedBlames,
                         const options::Options &opts);
 

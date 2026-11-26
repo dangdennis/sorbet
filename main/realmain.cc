@@ -895,6 +895,8 @@ int realmain(int argc, char *argv[]) {
             FileOps::write(opts.storeState[2].c_str(), result.fileTableData);
         }
 
+        pipeline::printEffectFactDefs(*gs, opts);
+
         auto untypedBlames = getAndClearHistogram("untyped.blames");
         if constexpr (sorbet::track_untyped_blame_mode) {
             pipeline::printUntypedBlames(*gs, untypedBlames, opts);

@@ -7,6 +7,8 @@
 #include "infer/SigSuggestion.h"
 #include "infer/environment.h"
 #include "infer/infer.h"
+#include "infer/inference.h"
+#include <utility>
 
 using namespace std;
 namespace sorbet::infer {
@@ -42,7 +44,20 @@ bool silenceDeadCodeError(const cfg::InstructionPtr &value) {
     return value.isSynthetic() || cfg::isa_instruction<cfg::TAbsurd>(value);
 }
 
+namespace {
+thread_local vector<SendFact> sendFacts;
+} // namespace
+
+vector<SendFact> Inference::takeSendFacts() {
+    return std::exchange(sendFacts, {});
+}
+
+void Inference::recordSendFact(SendFact fact) {
+    sendFacts.emplace_back(fact);
+}
+
 unique_ptr<cfg::CFG> Inference::run(core::Context ctx, unique_ptr<cfg::CFG> cfg) {
+    sendFacts.clear();
     Timer timeit(ctx.state.tracer(), "Inference::run", {{"func", cfg->symbol.toStringFullName(ctx)}});
     ENFORCE(cfg->symbol == ctx.owner.asMethodRef());
     auto methodLoc = ctx.locAt(cfg->declLoc);
