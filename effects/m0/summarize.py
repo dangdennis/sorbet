@@ -6,7 +6,7 @@ effect analysis could see: the share of calls Sorbet resolves to a method, and t
 methods that would be Unknown because they contain, or reach, a call it could not resolve.
 
     sorbet --print=effect-facts:facts.jsonl <paths>
-    effects/m0/summarize.py facts.jsonl [--depth N] [--top N] [--methods]
+    effects/m0/summarize.py facts.jsonl [--exclude test/] [--depth N] [--top N] [--methods]
 
 Terms used in the report:
   resolved   Sorbet picked a specific method for the call.
@@ -14,12 +14,21 @@ Terms used in the report:
   nomethod   the receiver is typed but Sorbet found no such method (usually a type error).
   dynamic    resolved, but to a method whose job is to call something chosen at runtime
              (send, eval, define_method, Proc#call, ...).
-  Unknown    a method with at least one untyped/nomethod/dynamic call (local), or one that
-             calls such a method through resolved calls (transitive).
+  splat      a call with `*args` whose length Sorbet does not know, so it gives up on the
+             call without looking up the method. Recoverable: the receiver is still typed.
+  unanalysed resolved, but to a method defined in a file Sorbet does not run inference on
+             (`typed: false` or `typed: ignore`), so nothing is known about its body.
+  Unknown    a method with at least one call of the kinds above other than resolved (local), or
+             one that calls such a method through resolved calls (transitive).
+
+Calls into the standard library and into gems that only have RBI files count as resolved here.
+They have no body to analyse, so they are what the seed table has to cover.
 """
 import argparse
 import collections
 import json
+import os
+import re
 import sys
 
 # Methods that hand control to code chosen at runtime. A call that resolves to one of these is
@@ -36,6 +45,10 @@ DYNAMIC_OWNER_FUNS = {
     ("Proc", "call"), ("Proc", "()"), ("Proc", "[]"), ("Proc", "yield"), ("Proc", "==="),
     ("Method", "call"), ("Method", "[]"), ("Method", "==="), ("UnboundMethod", "bind_call"),
 }
+
+# Sorbet's internal stand-ins for `recv.fun(*args)`. One of these survives as the callee only
+# when Sorbet gave up before dispatching the real call.
+SPLAT_FUNS = {"<call-with-splat>", "<call-with-splat-and-block-pass>"}
 
 STRICT_NAMES = {2: "ignore", 3: "false", 4: "true", 5: "strict", 6: "strong"}
 
@@ -66,15 +79,27 @@ def load(path):
     return defs, bodies
 
 
+def fun_name(d):
+    # Overloaded methods are named like "send (overload.1)".
+    return re.sub(r" \(overload\.\d+\)$", "", d["fun"])
+
+
 def is_dynamic(d):
     if d is None:
         return False
     owner = d["owner"]
     if owner.startswith("T.class_of(") and owner.endswith(")"):
         owner = owner[len("T.class_of("):-1]
-    if (owner, d["fun"]) in DYNAMIC_OWNER_FUNS:
+    # `T.proc` types dispatch to Proc0, Proc1, ... depending on arity.
+    owner = re.sub(r"^Proc\d+$", "Proc", owner)
+    fun = fun_name(d)
+    if (owner, fun) in DYNAMIC_OWNER_FUNS:
         return True
-    return d["fun"] in DYNAMIC_FUNS and d["src"] != "source"
+    return fun in DYNAMIC_FUNS and d["src"] != "source"
+
+
+def is_lost_splat(d):
+    return d is not None and "<Magic>" in d["owner"] and d["fun"] in SPLAT_FUNS
 
 
 def callee_kind(mid, defs, bodies):
@@ -105,16 +130,24 @@ def main():
     ap.add_argument("facts")
     ap.add_argument("--depth", type=int, default=2, help="directory depth for the per-directory table")
     ap.add_argument("--top", type=int, default=15, help="rows in each 'top' table")
+    ap.add_argument("--exclude", action="append", default=[], metavar="PREFIX",
+                    help="leave out method bodies in files under this path prefix (repeatable), e.g. test/")
     ap.add_argument("--methods", action="store_true", help="print the status of every method (for fixtures)")
+    ap.add_argument("--check", metavar="DIR", help="compare against the `# known` / `# unknown (...)` comments "
+                    "above each method in the fixture files under DIR; exit 1 on any mismatch")
     args = ap.parse_args()
 
     defs, bodies = load(args.facts)
+    if args.exclude:
+        bodies = {m: b for m, b in bodies.items() if not any(b["file"].lstrip("./").startswith(x) for x in args.exclude)}
+    analysed_files = {b["file"] for b in bodies.values()}
 
     # ---- per-call numbers -------------------------------------------------------------------
     sends = collections.Counter()
     kinds = collections.Counter()
     seeds = collections.Counter()
     dynamic_callees = collections.Counter()
+    unanalysed_callees = collections.Counter()
     untyped_funs = collections.Counter()
     local_unknown = {}  # method id -> list of reasons
     edges = collections.defaultdict(set)  # callee -> callers, followed edges only
@@ -128,12 +161,24 @@ def main():
             if kind == "untyped":
                 untyped_funs[fun] += 1
         dyn_here = 0
+        splat_here = 0
+        unanalysed_here = 0
         for callee in b["calls"]:
             d = defs.get(callee)
+            if is_lost_splat(d):
+                splat_here += 1
+                reasons.append("splat of unknown length")
+                continue
             if is_dynamic(d):
                 dyn_here += 1
                 dynamic_callees[d["name"]] += 1
                 reasons.append(f"dynamic `{d['name']}`")
+                continue
+            if d is not None and d["src"] == "source" and callee not in bodies and d["file"] not in analysed_files \
+                    and not any(d["file"].lstrip("./").startswith(x) for x in args.exclude):
+                unanalysed_here += 1
+                unanalysed_callees[d["name"]] += 1
+                reasons.append(f"calls `{d['name']}` in a file with no inference")
                 continue
             kind = callee_kind(callee, defs, bodies)
             kinds[kind] += 1
@@ -143,7 +188,9 @@ def main():
                 seeds[d["name"]] += 1
         # `calls` is de-duplicated per method, so dynamic calls are counted once per callee here.
         sends["dynamic"] += dyn_here
-        sends["resolved"] += resolved - dyn_here
+        sends["splat"] += splat_here
+        sends["unanalysed"] += unanalysed_here
+        sends["resolved"] += resolved - dyn_here - splat_here - unanalysed_here
         if reasons:
             local_unknown[mid] = reasons
 
@@ -176,7 +223,7 @@ def main():
     total_sends = sum(sends.values())
     print("== Calls ==")
     print(f"  total                {total_sends:>9}")
-    for k in ("resolved", "untyped", "nomethod", "dynamic"):
+    for k in ("resolved", "untyped", "nomethod", "dynamic", "splat", "unanalysed"):
         print(f"  {k:<20} {sends[k]:>9}  {pct(sends[k], total_sends)}")
 
     print("\n== Where resolved calls go (distinct callees per method) ==")
@@ -210,6 +257,7 @@ def main():
 
     top("Most common method names called on an untyped receiver", untyped_funs)
     top("Most common dynamic callees", dynamic_callees)
+    top("Most-called methods in files with no inference", unanalysed_callees)
     top("Most-called methods with no body (the seed worklist)", seeds)
     top("Locally-unknown methods that make the most callers Unknown",
         collections.Counter({name(m): n for m, n in spread.items()}))
@@ -224,6 +272,33 @@ def main():
             elif mid in unknown_via:
                 why = "  <- calls " + name(unknown_via[mid])
             print(f"  {b['file']}:{b['line']:<4} {name(mid):<40} {status(mid)}{why}")
+
+    if args.check:
+        bad = 0
+        checked = 0
+        for mid, b in bodies.items():
+            path = os.path.join(args.check, os.path.basename(b["file"]))
+            if not os.path.exists(path) or b["line"] == 0:
+                continue
+            lines = open(path).read().split("\n")
+            expected = None
+            # Walk up from the `def` over its sig to the comment block above it.
+            for i in range(b["line"] - 2, max(b["line"] - 8, -1), -1):
+                m = re.match(r"\s*# (known|unknown \((?:local|transitive)\))", lines[i])
+                if m:
+                    expected = m.group(1)
+                    break
+                if re.match(r"\s*(def |end\b|class |module )", lines[i]):
+                    break
+            if expected is None:
+                continue
+            checked += 1
+            if expected != status(mid):
+                bad += 1
+                print(f"MISMATCH {name(mid)}: expected {expected}, got {status(mid)}")
+        print(f"\nfixture check: {checked - bad}/{checked} methods match")
+        return 1 if bad else 0
+    return 0
 
 
 if __name__ == "__main__":

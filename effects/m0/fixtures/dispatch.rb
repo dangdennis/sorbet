@@ -48,10 +48,16 @@ class Service
     xs.map(&:upcase)
   end
 
-  # known: splat call
+  # unknown (local): splat of an array whose length Sorbet doesn't know, so it never looks up `add`
   sig { params(xs: T::Array[Integer]).returns(Integer) }
   def splat(xs)
     add(*T.unsafe(xs))
+  end
+
+  # known: splat of a literal, so Sorbet dispatches to `add` as usual
+  sig { returns(Integer) }
+  def splat_literal
+    add(*[1, 2])
   end
 
   sig { params(a: Integer, b: Integer).returns(Integer) }
